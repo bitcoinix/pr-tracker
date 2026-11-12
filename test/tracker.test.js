@@ -6,7 +6,7 @@ const assert = require("node:assert/strict");
 require("../tracker.js");
 const {
   parsePR, nextBranches, hydraLink, flattenTree, comparisonState,
-  createClient, trackPR, GitHubError,
+  createInclusionCache, createClient, trackPR, GitHubError,
 } = globalThis.PRTracker;
 
 const mergedPR = {
@@ -25,6 +25,24 @@ function fixture(pr = mergedPR, comparisons = ["ahead", "behind", "diverged"]) {
       const response = comparisons[calls.length - 2];
       if (response instanceof Error) throw response;
       return { status: response };
+    },
+  };
+}
+
+function cookieDocument() {
+  const cookies = new Map();
+  const writes = [];
+  return {
+    writes,
+    location: { protocol: "https:" },
+    get cookie() { return [...cookies].map(([name, value]) => `${name}=${value}`).join("; "); },
+    set cookie(cookie) {
+      writes.push(cookie);
+      const [pair, ...attributes] = cookie.split("; ");
+      const separator = pair.indexOf("=");
+      const name = pair.slice(0, separator);
+      if (attributes.includes("Max-Age=0")) cookies.delete(name);
+      else cookies.set(name, pair.slice(separator + 1));
     },
   };
 }
@@ -117,6 +135,122 @@ test("merged PRs query each descendant independently and stream partial results"
   assert.equal(updates[0].tree.children[0].state, "checking");
   assert.equal(updates[1].tree.children[0].state, "accepted");
   assert.equal(updates.at(-1).complete, true);
+});
+
+test("positive results persist in cookies and skip comparisons on a later visit", async () => {
+  const document = cookieDocument();
+  const first = fixture(mergedPR, ["ahead", "identical", "ahead"]);
+  const fresh = await trackPR(123, { ...first, cache: createInclusionCache(document) });
+  assert.ok(flattenTree(fresh.tree).every(node => node.state === "accepted" && !node.cached));
+  assert.match(document.writes.at(-1), /; Path=\/; Max-Age=31536000; SameSite=Lax; Secure$/);
+
+  const second = fixture();
+  const cached = await trackPR(123, { ...second, cache: createInclusionCache(document) });
+  assert.deepEqual(second.calls, ["/pulls/123"]);
+  assert.deepEqual(flattenTree(cached.tree).map(node => node.cached), [false, true, true, true]);
+  assert.ok(flattenTree(cached.tree).every(node => node.state === "accepted"));
+  assert.equal(cached.complete, true);
+});
+
+test("pending and unknown branches are checked again while positive branches use cookies", async () => {
+  const cache = createInclusionCache(cookieDocument());
+  await trackPR(123, {
+    ...fixture(mergedPR, ["ahead", "behind", new GitHubError("Unavailable", 503)]), cache,
+  });
+  const client = fixture(mergedPR, ["identical", "ahead"]);
+  const result = await trackPR(123, { ...client, cache });
+  assert.deepEqual(client.calls, [
+    "/pulls/123",
+    "/compare/abcdef...nixos-unstable-small?per_page=1",
+    "/compare/abcdef...nixos-unstable?per_page=1",
+  ]);
+  assert.deepEqual(flattenTree(result.tree).map(node => node.cached), [false, true, false, false]);
+  assert.ok(flattenTree(result.tree).every(node => node.state === "accepted"));
+});
+
+test("cached inclusion is isolated by PR number, merge commit, and branch", async () => {
+  const cache = createInclusionCache(cookieDocument());
+  cache.add(123, "abcdef", "nixpkgs-unstable");
+  assert.equal(cache.has(123, "abcdef", "nixpkgs-unstable"), true);
+  assert.equal(cache.has(124, "abcdef", "nixpkgs-unstable"), false);
+  assert.equal(cache.has(123, "abcdef", "nixos-unstable"), false);
+  assert.equal(cache.has(123, "new-merge", "nixpkgs-unstable"), false);
+
+  for (const pr of [{ ...mergedPR, number: 124 }, { ...mergedPR, merge_commit_sha: "new-merge" }]) {
+    const client = fixture(pr, ["behind", "behind", "behind"]);
+    const result = await trackPR(pr.number, { ...client, cache });
+    assert.equal(client.calls.length, 4);
+    assert.ok(flattenTree(result.tree).every(node => !node.cached));
+  }
+});
+
+test("refresh bypasses the selected branch's cookie and replaces or removes its result", async () => {
+  for (const response of ["ahead", "behind", new GitHubError("Unavailable", 503)]) {
+    const cache = createInclusionCache(cookieDocument());
+    await trackPR(123, { ...fixture(mergedPR, ["ahead", "ahead", "ahead"]), cache });
+    const client = fixture(mergedPR, [response]);
+    const result = await trackPR(123, { ...client, cache, forceBranch: "nixos-unstable-small" });
+    assert.deepEqual(client.calls, ["/pulls/123", "/compare/abcdef...nixos-unstable-small?per_page=1"]);
+    const node = result.tree.children[1];
+    assert.equal(node.cached, false);
+    assert.equal(node.state, response === "ahead" ? "accepted" : response === "behind" ? "pending" : "unknown");
+    assert.equal(cache.has(123, "abcdef", node.branch), response === "ahead");
+    assert.equal(result.tree.children[0].cached, true);
+    assert.equal(node.children[0].cached, true);
+  }
+});
+
+test("cancelled refreshes do not leave stale inclusion in cookies", async () => {
+  const cache = createInclusionCache(cookieDocument());
+  cache.add(123, "abcdef", "nixpkgs-unstable");
+  const controller = new AbortController();
+  const client = fixture();
+  await assert.rejects(trackPR(123, {
+    ...client, cache, forceBranch: "nixpkgs-unstable", signal: controller.signal,
+    onUpdate() { controller.abort(); },
+  }), { name: "AbortError" });
+  assert.equal(cache.has(123, "abcdef", "nixpkgs-unstable"), false);
+  assert.deepEqual(client.calls, ["/pulls/123"]);
+});
+
+test("cached branches remain included when another branch hits the rate limit", async () => {
+  const cache = createInclusionCache(cookieDocument());
+  cache.add(123, "abcdef", "nixos-unstable");
+  const client = fixture(mergedPR, [new GitHubError("Rate limit", 429)]);
+  const result = await trackPR(123, { ...client, cache });
+  assert.deepEqual(flattenTree(result.tree).map(node => node.state),
+    ["accepted", "unknown", "unknown", "accepted"]);
+  assert.equal(result.tree.children[1].children[0].cached, true);
+  assert.equal(client.calls.length, 2);
+});
+
+test("malformed cookies are ignored and tracking can replace them", async () => {
+  for (const value of ["%", "null", "{}", '{"mergeCommit":"abcdef","branches":[123]}']) {
+    const document = cookieDocument();
+    document.cookie = `nixpkgs-pr-included-v1-123=${encodeURIComponent(value)}`;
+    const cache = createInclusionCache(document);
+    const client = fixture();
+    const result = await trackPR(123, { ...client, cache });
+    assert.equal(client.calls.length, 4);
+    assert.equal(result.tree.children[0].cached, false);
+    assert.equal(cache.has(123, "abcdef", "nixpkgs-unstable"), true);
+  }
+});
+
+test("missing, blocked, and silently rejected cookies do not interfere with tracking", async () => {
+  for (const document of [
+    undefined,
+    { get cookie() { throw new Error("Blocked"); }, set cookie(_value) { throw new Error("Blocked"); } },
+    { get cookie() { return ""; }, set cookie(_value) {} },
+  ]) {
+    const cache = createInclusionCache(document);
+    for (let visit = 0; visit < 2; visit++) {
+      const client = fixture(mergedPR, ["ahead", "ahead", "ahead"]);
+      const result = await trackPR(123, { ...client, cache });
+      assert.equal(client.calls.length, 4);
+      assert.ok(flattenTree(result.tree).every(node => node.state === "accepted" && !node.cached));
+    }
+  }
 });
 
 test("staging and release PRs follow their respective trees", async () => {

@@ -2,7 +2,8 @@
 "use strict";
 
 (() => {
-  const { repository, parsePR, flattenTree, createClient, trackPR } = PRTracker;
+  const { repository, parsePR, flattenTree, createInclusionCache, createClient, trackPR } = PRTracker;
+  const cache = createInclusionCache();
   const $ = id => document.getElementById(id);
   const labels = {
     accepted: ["✓", "Included"],
@@ -19,7 +20,7 @@
     return node;
   }
 
-  function renderNode(node) {
+  function renderNode(node, number) {
     const item = element("li", `branch ${node.state}`);
     const row = element("div", "branch-row");
     const [symbol, label] = labels[node.state];
@@ -27,7 +28,14 @@
     icon.setAttribute("aria-hidden", "true");
     const link = element("a", "branch-name", node.branch);
     link.href = `${repository}/tree/${encodeURIComponent(node.branch)}`;
-    row.append(icon, link, element("span", "branch-state", label));
+    row.append(icon, link, element("span", "branch-state", node.cached ? "Included (cached)" : label));
+    if (node.cached) {
+      const refresh = element("button", "secondary branch-refresh", "Refresh");
+      refresh.type = "button";
+      refresh.setAttribute("aria-label", `Refresh inclusion in ${node.branch}`);
+      refresh.addEventListener("click", () => track(String(number), false, node.branch));
+      row.append(refresh);
+    }
     if (node.hydra) {
       const hydra = element("a", "hydra", "Hydra ↗");
       hydra.href = node.hydra;
@@ -38,7 +46,7 @@
     if (node.detail) item.append(element("p", "branch-detail", node.detail));
     if (node.children.length) {
       const children = document.createElement("ul");
-      children.append(...node.children.map(renderNode));
+      children.append(...node.children.map(child => renderNode(child, number)));
       item.append(children);
     }
     return item;
@@ -61,7 +69,7 @@
         : `Merged into ${pr.base.ref}${pr.merged_at ? ` on ${new Date(pr.merged_at).toLocaleDateString()}` : ""}.`;
     $("warning").textContent = warning;
     $("warning").hidden = !warning;
-    $("tree").replaceChildren(...(tree ? [renderNode(tree)] : []));
+    $("tree").replaceChildren(...(tree ? [renderNode(tree, pr.number)] : []));
     $("tree-help").hidden = !tree;
     document.title = `Nixpkgs PR #${pr.number}: ${pr.title}`;
     const nodes = tree ? flattenTree(tree) : [];
@@ -71,10 +79,10 @@
       ? `Checking release branches… ${checking} remaining.`
       : unknown
         ? `Check complete. ${unknown} branch${unknown === 1 ? " has" : "es have"} unknown progress.`
-        : `Checked at ${new Date().toLocaleTimeString()}. Submit again to refresh.`;
+        : `Loaded at ${new Date().toLocaleTimeString()}. Submit again to check uncached branches.`;
   }
 
-  async function track(input, updateURL = true) {
+  async function track(input, updateURL = true, forceBranch) {
     activeRequest?.abort();
     const controller = new AbortController();
     activeRequest = controller;
@@ -103,7 +111,7 @@
         },
       });
       await trackPR(number, {
-        request, signal: controller.signal,
+        request, signal: controller.signal, cache, forceBranch,
         onUpdate(result) { if (!controller.signal.aborted) render(result); },
       });
     } catch (error) {

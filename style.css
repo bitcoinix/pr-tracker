@@ -59,6 +59,7 @@ details[open] summary { margin-bottom: 1rem; }
 .unknown > .branch-row > .state-icon, .unknown > .branch-row > .branch-state { color: var(--amber); }
 .branch-name { font-family: ui-monospace, monospace; font-size: .85rem; overflow-wrap: anywhere; min-width: 0; }
 .branch-state { color: var(--muted); font-size: .7rem; }
+.branch-refresh { font-size: .7rem; padding: .2rem .5rem; min-height: 1.7rem; }
 .hydra { margin-left: auto; font-size: .7rem; }
 .branch-detail { font-size: .75rem; color: var(--muted); margin: .25rem 0 .5rem 2.3rem; overflow-wrap: anywhere; }
 #tree-help { border-top: 1px solid var(--border); padding-top: 1rem; margin-bottom: 0; }

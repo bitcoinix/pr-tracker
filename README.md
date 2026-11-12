@@ -20,7 +20,9 @@ Usage
 
 Enter a PR number, #123, or a https://github.com/NixOS/nixpkgs/pull/123 URL.
 The ?pr=123 query parameter loads a PR automatically and can be bookmarked
-or shared on a static host. Submit again to refresh; there is no polling.
+or shared on a static host. Submit again to check uncached branches; there
+is no polling. Previously confirmed branches show "Included (cached)" with
+a Refresh button that forces a new check for that branch.
 
 The tree retains the branch routes and Hydra links from src/branches.rs,
 including staging, haskell-updates, release branches, and older releases.
@@ -32,7 +34,7 @@ How it works
 ------------
 
 GET /repos/NixOS/nixpkgs/pulls/{number} supplies the title, state, target
-branch, and merge_commit_sha. For each downstream branch the app requests:
+branch, and merge_commit_sha. For each uncached downstream branch the app requests:
 
     GET /repos/NixOS/nixpkgs/compare/{merge_commit_sha}...{branch}?per_page=1
 
@@ -40,8 +42,16 @@ An "ahead" or "identical" comparison means the branch contains the merge
 commit. "Behind" or "diverged" means pending. This uses commit ancestry,
 not the paginated list of commits, and replaces git branch --contains.
 Requests run sequentially and results appear as they arrive. A merged PR
-targeting master needs four API requests; one targeting staging needs six.
+targeting master needs up to four API requests; one targeting staging needs up to six.
 Open and closed, unmerged PRs need only one.
+
+Positive downstream results are saved in first-party cookies for one year,
+keyed by PR number, merge commit, and branch. Cached branches skip the
+comparison request. PR metadata is always fetched, so the base branch's
+merge status stays fresh. Pending and unknown results are never cached.
+Refresh discards that branch's saved result before checking again, while
+other confirmed branches still use the cache. If cookies are blocked or
+unavailable (for example, when opened from disk), normal checks still work.
 
 API failures, deleted branches, and missing or unreliable historical merge
 commits show unknown progress, never a false pending result. One branch's

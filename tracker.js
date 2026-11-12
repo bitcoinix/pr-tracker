@@ -68,7 +68,7 @@
 
   function makeTree(branch, state) {
     return {
-      branch, state, detail: "", hydra: hydraLink(branch),
+      branch, state, cached: false, detail: "", hydra: hydraLink(branch),
       children: nextBranches(branch).map(next => makeTree(next, state)),
     };
   }
@@ -83,6 +83,49 @@
     if (status === "ahead" || status === "identical") return "accepted";
     if (status === "behind" || status === "diverged") return "pending";
     throw new Error("GitHub returned an unrecognized comparison result.");
+  }
+
+  function createInclusionCache(cookieDocument = globalThis.document) {
+    const cookieName = number => `nixpkgs-pr-included-v1-${number}`;
+
+    function read(number, mergeCommit) {
+      try {
+        const prefix = `${cookieName(number)}=`;
+        const cookie = cookieDocument.cookie.split(";").map(value => value.trim())
+          .find(value => value.startsWith(prefix));
+        if (cookie) {
+          const data = JSON.parse(decodeURIComponent(cookie.slice(prefix.length)));
+          if (data.mergeCommit === mergeCommit && Array.isArray(data.branches) &&
+              data.branches.every(branch => typeof branch === "string")) {
+            return new Set(data.branches);
+          }
+        }
+      } catch { /* Missing, malformed, or blocked cookies are cache misses. */ }
+      return new Set();
+    }
+
+    function write(number, mergeCommit, branches) {
+      try {
+        const value = encodeURIComponent(JSON.stringify({ mergeCommit, branches: [...branches] }));
+        const secure = cookieDocument.location?.protocol === "https:" ? "; Secure" : "";
+        cookieDocument.cookie = `${cookieName(number)}=${value}; Path=/; ` +
+          `Max-Age=${branches.size ? 31536000 : 0}; SameSite=Lax${secure}`;
+      } catch { /* Tracking still works when cookies are unavailable, including file://. */ }
+    }
+
+    return {
+      has(number, mergeCommit, branch) { return read(number, mergeCommit).has(branch); },
+      add(number, mergeCommit, branch) {
+        const branches = read(number, mergeCommit);
+        branches.add(branch);
+        write(number, mergeCommit, branches);
+      },
+      delete(number, mergeCommit, branch) {
+        const branches = read(number, mergeCommit);
+        branches.delete(branch);
+        write(number, mergeCommit, branches);
+      },
+    };
   }
 
   class GitHubError extends Error {
@@ -148,8 +191,9 @@
     };
   }
 
-  async function trackPR(number, { request, signal, onUpdate = () => {} }) {
-    const pr = await request(`/pulls/${parsePR(String(number))}`);
+  async function trackPR(number, { request, signal, cache, forceBranch, onUpdate = () => {} }) {
+    number = parsePR(String(number));
+    const pr = await request(`/pulls/${number}`);
     signal?.throwIfAborted();
     const state = pr.merged ? "merged" : pr.state === "closed" ? "closed" : "open";
     const result = { pr, state, tree: null, warning: "", complete: false };
@@ -179,11 +223,22 @@
       result.warning = "GitHub does not provide a reliable merge commit for this PR, so its progress beyond the base branch is unknown.";
       descendants.forEach(node => { node.state = "unknown"; });
     } else {
+      for (const node of descendants) {
+        if (node.branch === forceBranch) {
+          // Remove the old result before checking so failures or cancellation
+          // cannot leave a stale positive result for the next lookup.
+          cache?.delete(number, mergeCommit, node.branch);
+        } else if (cache?.has(number, mergeCommit, node.branch)) {
+          node.state = "accepted";
+          node.cached = true;
+        }
+      }
       onUpdate(result);
       let stoppedError;
       // Small, sequential requests avoid bursts and preserve partial results.
       for (const node of descendants) {
         signal?.throwIfAborted();
+        if (node.cached) continue;
         try {
           if (stoppedError) throw stoppedError;
           const comparison = await request(
@@ -191,6 +246,7 @@
           );
           signal?.throwIfAborted();
           node.state = comparisonState(comparison.status);
+          if (node.state === "accepted") cache?.add(number, mergeCommit, node.branch);
         } catch (error) {
           if (signal?.aborted || error.name === "AbortError") throw error;
           node.state = "unknown";
@@ -208,6 +264,6 @@
 
   globalThis.PRTracker = Object.freeze({
     repository, parsePR, nextBranches, hydraLink, flattenTree,
-    comparisonState, createClient, trackPR, GitHubError,
+    comparisonState, createInclusionCache, createClient, trackPR, GitHubError,
   });
 })();
