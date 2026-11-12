@@ -1,0 +1,66 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later WITH GPL-3.0-linking-exception -->
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light dark">
+    <meta name="description" content="Follow a Nixpkgs pull request from merge to release channels, directly from your browser.">
+    <title>Nixpkgs Pull Request Tracker</title>
+    <link rel="stylesheet" href="style.css">
+    <script src="tracker.js" defer></script>
+    <script src="app.js" defer></script>
+  </head>
+  <body>
+    <main>
+      <header>
+        <p class="eyebrow"><a href="https://github.com/NixOS/nixpkgs">NixOS / nixpkgs</a></p>
+        <h1>Pull request tracker</h1>
+        <p class="intro">Follow a change from pull request to release channel.</p>
+      </header>
+
+      <form id="track-form" method="get">
+        <label for="pr">Pull request number or URL</label>
+        <div class="input-row">
+          <input id="pr" name="pr" type="text" placeholder="#123 or a GitHub PR URL" required
+                 autocomplete="off" spellcheck="false" aria-describedby="input-help">
+          <button type="submit">Track PR <span aria-hidden="true">→</span></button>
+        </div>
+        <p id="input-help" class="help">Paste a NixOS/nixpkgs pull request link, or enter its number.</p>
+        <details id="authentication">
+          <summary>Optional GitHub token</summary>
+          <label for="token">Personal access token</label>
+          <div class="input-row">
+            <input id="token" type="password" autocomplete="off" spellcheck="false"
+                   aria-describedby="token-help" placeholder="Use a token for a higher API limit">
+            <button id="clear-token" type="button" class="secondary">Clear</button>
+          </div>
+          <p id="token-help" class="help">The token is sent only to GitHub and kept in this page until you clear it or reload. No token is needed for public PRs.</p>
+        </details>
+      </form>
+
+      <p id="error" class="notice error" role="alert" hidden></p>
+      <p id="status" class="help" role="status" aria-live="polite"></p>
+      <section id="result" aria-label="Pull request progress" hidden>
+        <div class="result-heading">
+          <a id="pr-link" class="pr-number"></a>
+          <span id="pr-state" class="badge"></span>
+        </div>
+        <h2 id="pr-title"></h2>
+        <p id="pr-description" class="help"></p>
+        <p id="warning" class="notice" hidden></p>
+        <ul id="tree" class="tree" aria-label="Branch propagation"></ul>
+        <p id="tree-help" class="help">Each branch is checked independently. “Included” means it contains the PR’s merge commit. Hydra links show build progress.</p>
+      </section>
+      <p id="rate-limit" class="help rate-limit"></p>
+
+      <noscript><p class="notice">Enable JavaScript to query GitHub and track pull requests.</p></noscript>
+      <footer>
+        <p>Runs entirely in your browser · Data from the GitHub API</p>
+        <p>Based on <a href="https://git.qyliss.net/pr-tracker/">pr-tracker</a> by
+          <a href="https://alyssa.is/">Alyssa Ross</a> ·
+          <a href="README.md">About &amp; source files</a> · AGPL-3.0-or-later</p>
+      </footer>
+    </main>
+  </body>
+</html>
