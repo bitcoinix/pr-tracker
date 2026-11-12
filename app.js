@@ -2,8 +2,11 @@
 "use strict";
 
 (() => {
-  const { repository, parsePR, flattenTree, createInclusionCache, createClient, trackPR } = PRTracker;
+  const {
+    repository, parsePR, flattenTree, createInclusionCache, createTokenStore, createClient, trackPR,
+  } = PRTracker;
   const cache = createInclusionCache();
+  const tokenStore = createTokenStore();
   const $ = id => document.getElementById(id);
   const labels = {
     accepted: ["✓", "Included"],
@@ -101,6 +104,7 @@
         try { history.replaceState(null, "", url); } catch { /* Tracking still works. */ }
       }
       $("status").textContent = `Loading pull request #${number}…`;
+      tokenStore.save($("token").value);
       const request = createClient({
         token: $("token").value,
         signal: controller.signal,
@@ -122,12 +126,15 @@
     }
   }
 
+  $("token").value = tokenStore.load();
+  $("token").addEventListener("input", () => tokenStore.save($("token").value));
   $("track-form").addEventListener("submit", event => {
     event.preventDefault();
     track($("pr").value);
   });
   $("clear-token").addEventListener("click", () => {
     $("token").value = "";
+    tokenStore.save("");
     // Stop requests still carrying the cleared token.
     activeRequest?.abort();
     $("result").hidden = true;

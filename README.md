@@ -75,9 +75,18 @@ may share this quota; GitHub also applies secondary limits.
 
 The optional password field accepts a personal access token for a higher
 limit. Public repository access is sufficient; no write access is needed.
-The app sends the token only in an Authorization header to api.github.com.
-It does not save it in cookies, localStorage, sessionStorage, or the URL.
-Reload or use Clear to forget it. Clearing also cancels the active lookup.
+The app uses the token in an Authorization header to api.github.com and
+saves it in a first-party cookie for up to one year, restoring it on page
+load before any automatic lookup. Editing the field updates the saved
+token; emptying it or using Clear removes the cookie. Clear also cancels
+the active lookup.
+
+The token cookie uses Secure and SameSite=Strict, is limited to this host,
+and is also sent by the browser to the tracker host with eligible HTTPS
+requests. It is accessible to this page's JavaScript. When cookies are
+blocked or unavailable (including ordinary HTTP or file:// pages), the
+token still works for the current page but may need to be entered again
+after reloading. The token is never added to the URL.
 
 GitHub API documentation:
 https://docs.github.com/en/rest/pulls/pulls#get-a-pull-request

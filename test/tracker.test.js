@@ -3,10 +3,12 @@
 
 const { test } = require("node:test");
 const assert = require("node:assert/strict");
+const { readFileSync } = require("node:fs");
+const { runInNewContext } = require("node:vm");
 require("../tracker.js");
 const {
   parsePR, nextBranches, hydraLink, flattenTree, comparisonState,
-  createInclusionCache, createClient, trackPR, GitHubError,
+  createInclusionCache, createTokenStore, createClient, trackPR, GitHubError,
 } = globalThis.PRTracker;
 
 const mergedPR = {
@@ -251,6 +253,97 @@ test("missing, blocked, and silently rejected cookies do not interfere with trac
       assert.ok(flattenTree(result.tree).every(node => node.state === "accepted" && !node.cached));
     }
   }
+});
+
+test("saved tokens survive reloads and can be replaced or cleared without deleting branch cookies", () => {
+  const document = cookieDocument();
+  const cache = createInclusionCache(document);
+  cache.add(123, "abcdef", "nixpkgs-unstable");
+  const store = createTokenStore(document);
+  assert.equal(store.load(), "");
+  store.save(" example-token ");
+  assert.equal(createTokenStore(document).load(), "example-token");
+  assert.match(document.writes.at(-1), /; Path=\/; Max-Age=31536000; SameSite=Strict; Secure$/);
+  assert.doesNotMatch(document.writes.at(-1), /; Domain=/i);
+  store.save("replacement-token");
+  assert.equal(createTokenStore(document).load(), "replacement-token");
+  store.save(" ");
+  assert.equal(createTokenStore(document).load(), "");
+  assert.match(document.writes.at(-1), /; Max-Age=0;/);
+  assert.equal(cache.has(123, "abcdef", "nixpkgs-unstable"), true);
+});
+
+test("token cookie values are encoded and always require secure transport", () => {
+  const document = cookieDocument();
+  document.location.protocol = "http:";
+  const store = createTokenStore(document);
+  store.save("example;token=with%separators");
+  assert.equal(store.load(), "example;token=with%separators");
+  assert.match(document.writes.at(-1), /^nixpkgs-pr-token-v1=example%3Btoken%3Dwith%25separators;/);
+  assert.match(document.writes.at(-1), /; Secure$/);
+});
+
+test("malformed and unavailable token cookies do not break loading, saving, or clearing", () => {
+  const malformed = cookieDocument();
+  malformed.cookie = "nixpkgs-pr-token-v1=%broken";
+  assert.equal(createTokenStore(malformed).load(), "");
+  for (const document of [
+    undefined,
+    { get cookie() { throw new Error("Blocked"); }, set cookie(_value) { throw new Error("Blocked"); } },
+    { get cookie() { return ""; }, set cookie(_value) {} },
+  ]) {
+    const store = createTokenStore(document);
+    assert.equal(store.load(), "");
+    store.save("example-token");
+    assert.equal(store.load(), "");
+    store.save("");
+  }
+});
+
+test("the app restores tokens before automatic lookup, persists edits, and clears saved credentials", async () => {
+  const document = cookieDocument();
+  const store = createTokenStore(document);
+  store.save("saved-token");
+  const elements = new Map();
+  document.getElementById = id => {
+    if (!elements.has(id)) elements.set(id, {
+      value: "", listeners: {},
+      addEventListener(event, handler) { this.listeners[event] = handler; },
+    });
+    return elements.get(id);
+  };
+  let requestOptions;
+  runInNewContext(readFileSync(require.resolve("../app.js"), "utf8"), {
+    document, AbortController, URL, URLSearchParams,
+    location: { search: "?pr=123" },
+    window: { addEventListener() {} },
+    PRTracker: {
+      ...globalThis.PRTracker,
+      createInclusionCache: () => createInclusionCache(document),
+      createTokenStore: () => createTokenStore(document),
+      createClient: options => createClient({
+        ...options,
+        fetchImpl: async (_url, init) => {
+          requestOptions = init;
+          return Response.json(mergedPR);
+        },
+      }),
+    },
+  });
+  const token = elements.get("token");
+  assert.equal(token.value, "saved-token");
+  assert.equal(requestOptions.headers.Authorization, "Bearer saved-token");
+  token.value = "edited-token";
+  token.listeners.input();
+  assert.equal(store.load(), "edited-token");
+  elements.get("clear-token").listeners.click();
+  assert.equal(token.value, "");
+  assert.equal(createTokenStore(document).load(), "");
+  assert.equal(requestOptions.signal.aborted, true);
+  // Allow the cancelled request to settle; it must not restore the token or render results.
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(store.load(), "");
+  assert.equal(elements.get("result").hidden, true);
 });
 
 test("staging and release PRs follow their respective trees", async () => {

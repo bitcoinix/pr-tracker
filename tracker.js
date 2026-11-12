@@ -128,6 +128,29 @@
     };
   }
 
+  function createTokenStore(cookieDocument = globalThis.document) {
+    const name = "nixpkgs-pr-token-v1";
+    return {
+      load() {
+        try {
+          const prefix = `${name}=`;
+          const cookie = cookieDocument.cookie.split(";").map(value => value.trim())
+            .find(value => value.startsWith(prefix));
+          if (cookie) return decodeURIComponent(cookie.slice(prefix.length)).trim();
+        } catch { /* Missing, malformed, or blocked cookies leave the token empty. */ }
+        return "";
+      },
+      save(token) {
+        try {
+          const value = token.trim();
+          // Always Secure: a saved credential must not travel over plain HTTP.
+          cookieDocument.cookie = `${name}=${encodeURIComponent(value)}; Path=/; ` +
+            `Max-Age=${value ? 31536000 : 0}; SameSite=Strict; Secure`;
+        } catch { /* The token can still be used for this page when storage is unavailable. */ }
+      },
+    };
+  }
+
   class GitHubError extends Error {
     constructor(message, status) {
       super(message);
@@ -264,6 +287,6 @@
 
   globalThis.PRTracker = Object.freeze({
     repository, parsePR, nextBranches, hydraLink, flattenTree,
-    comparisonState, createInclusionCache, createClient, trackPR, GitHubError,
+    comparisonState, createInclusionCache, createTokenStore, createClient, trackPR, GitHubError,
   });
 })();
